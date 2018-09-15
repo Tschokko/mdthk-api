@@ -1,0 +1,43 @@
+syntax = "proto3";
+package moviecat;
+
+message ChannelEntry {
+  int32 version = 1;
+  int64 id = 2;
+  string name = 3;
+}
+
+message TopicEntry {
+  int32 version = 1;
+  int64 id = 2;
+  string name = 3;
+}
+
+message MovieEntry {
+  int32 version = 1;
+  string id = 2;
+  int64 channel_id = 3;
+  int64 topic_id = 4;
+  string title = 5;
+  int64 published_at = 6;
+  int64 duration = 7;
+  int64 size = 8;
+  string descr = 9;
+  string url = 10;
+  bool has_website_url = 11;
+  bool has_subtitle_url = 12;
+  bool has_small_format_url = 13;
+  bool has_hd_format_url = 14;
+  bool has_history_url = 15;
+  string geo = 16;
+  bool is_new = 17;
+}
+
+message MovieCatalog {
+  int32 version = 1;
+  int64 published_at = 2;
+  bytes md5_hash = 3;
+  repeated ChannelEntry channels = 4;
+  repeated TopicEntry topics = 5;
+  repeated MovieEntry movies = 6;
+}
