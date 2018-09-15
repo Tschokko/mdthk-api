@@ -16,28 +16,39 @@ import (
 )
 
 const (
-	colChannel        = 0
-	colTopic          = 1
-	colTitle          = 2
-	colDate           = 3
-	colTime           = 4
-	colDuration       = 5
-	colSize           = 6
-	colDescr          = 7
-	colURL            = 8
-	colWebsiteURL     = 9
-	colSubTitleURL    = 10
-	colSmallFormatURL = 12
-	colHDFormatURL    = 14
-	colUnixDate       = 16
-	colHistoryURL     = 17
-	colGeo            = 18
-	colIsNew          = 19
+	colMetaDataPublishedAt = 1
+	colMetaDataVersion     = 2
+	colMetaDataMD5Hash     = 4
+	colChannel             = 0
+	colTopic               = 1
+	colTitle               = 2
+	colDate                = 3
+	colTime                = 4
+	colDuration            = 5
+	colSize                = 6
+	colDescr               = 7
+	colURL                 = 8
+	colWebsiteURL          = 9
+	colSubTitleURL         = 10
+	colSmallFormatURL      = 12
+	colHDFormatURL         = 14
+	colUnixDate            = 16
+	colHistoryURL          = 17
+	colGeo                 = 18
+	colIsNew               = 19
 )
+
+type metaDataEntry struct {
+	publishedAt time.Time
+	version     string
+	md5Hash     string
+}
 
 type movieEntry struct {
 	channel        string
+	channelID      int64
 	topic          string
+	topicID        int64
 	title          string
 	publishedAt    time.Time
 	duration       string
@@ -64,23 +75,138 @@ func main() {
 	}
 	defer db.Close()
 
-	b, err := ioutil.ReadFile("filme.json")
+	b, err := ioutil.ReadFile("/Users/tlx3m3j/go/src/github.com/tschokko/mdthk-api/data/test1.json")
 	if err != nil {
-		fmt.Print(err)
-		return
+		log.Fatal(err)
 	}
 
 	str := string(b)
-	result, _ := unmarshalMovieEntries(str)
+	meta, err := unmarshalMetaDataEntry(str)
 
-	fmt.Printf("Entries: %d\n", len(result))
+	fmt.Printf("Meta: %v", meta)
 
-	err = bulkCopyMovieEntries(db, result)
+	_, _, movies, _ := unmarshalMovieImportSource(str)
+
+	fmt.Printf("Entries: %d\n", len(movies))
+
+	err = bulkCopyMovieEntries(db, movies)
 	if err != nil {
 		fmt.Print(err)
 	}
 }
 
+// unmarshalMetaDataEntry extracts the meta data entry of the import source.
+// The meta data is stored inside the first "Filmliste" dict element.
+func unmarshalMetaDataEntry(str string) (metaDataEntry, error) {
+	result := metaDataEntry{}
+	key := "\"Filmliste\""
+
+	// Fetch first "Filmliste" position
+	i := strings.Index(str, key)
+	if i == -1 {
+		return result, fmt.Errorf("could not find meta data")
+	}
+
+	s := str[i:]
+
+	// Strip the JSON key and trim
+	s = strings.Trim(s[len(key):], " \n\r\t")
+
+	// Check if colon exists
+	if s[:1] != ":" {
+		return result, fmt.Errorf("unexpected movie list format")
+	}
+
+	// Strip the colon and trim
+	s = strings.Trim(s[1:], " \n\r\t")
+
+	// Check if opening squared bracket exists
+	if s[:1] != "[" {
+		return result, fmt.Errorf("unexpected movie list format")
+	}
+
+	// Fetch second "Filmliste" position
+	j := strings.Index(s, key)
+	if j == -1 {
+		return result, fmt.Errorf("unexpected movie list format")
+	}
+
+	s = strings.Trim(s[:j], " \n\r\t")
+
+	// Trim the colon if exists
+	if s[len(s)-1:] == "," {
+		s = strings.Trim(s[:len(s)-1], " \n\r\t")
+	}
+
+	// Check if closing squared bracket exists
+	if s[len(s)-1:] != "]" {
+		return result, fmt.Errorf("unexpected movie list format")
+	}
+
+	// Unmarshal the JSON array
+	var vals []interface{}
+	err := json.Unmarshal([]byte(s), &vals)
+	if err != nil {
+		return result, fmt.Errorf("failed to unmarshal meta data")
+	}
+
+	if len(vals) < 5 {
+		return result, fmt.Errorf("unexpected meta data values")
+	}
+
+	// Parse the published at timestamp
+	result.publishedAt, err = time.Parse("02.01.2006, 15:04",
+		vals[colMetaDataPublishedAt].(string))
+	if err != nil {
+		return result, fmt.Errorf("invalied published at date in meta data")
+	}
+
+	result.version = strings.Trim(vals[colMetaDataVersion].(string), " ")
+	if result.version == "" {
+		return result, fmt.Errorf("empty version in meta data")
+	}
+
+	result.md5Hash = strings.Trim(vals[colMetaDataMD5Hash].(string), " ")
+	if result.md5Hash == "" {
+		return result, fmt.Errorf("empty md5 hash in meta data")
+	}
+
+	return result, nil
+}
+
+// extractMovieEntries searches the input source for valid movie entries. A
+// movie entry corresponds an JSON dict element with key "X" and a value of
+// type JSON array. E.g. "X": ["val1", "val2", ...]
+func extractMovieEntries(str string) ([]string, error) {
+	var result []string
+
+	indicies := extractMovieEntryKeyIndices(str)
+	for n := 0; n < len(indicies); n++ {
+		i := indicies[n]
+		j := len(str)
+		if n+1 < len(indicies) {
+			j = indicies[n+1]
+		}
+
+		s := str[i:j]
+		s = stripAndValidatePrefix(s)
+		if s == "" {
+			return nil, fmt.Errorf("invalid movie list")
+		}
+		s = stripAndValidateSuffix(s)
+		if s == "" {
+			return nil, fmt.Errorf("invalid movie list")
+		}
+
+		result = append(result, s)
+	}
+
+	return result, nil
+}
+
+// extractMovieEntryKeyIndices searches the input source for "X" strings.
+// If the string is followed by a JSON array, we expect a proper movie entry.
+// See also function isMovieEntryKey.
 func extractMovieEntryKeyIndices(str string) []int {
 	var result []int
 	key := "\"X\""
@@ -102,6 +228,8 @@ func extractMovieEntryKeyIndices(str string) []int {
 	return result
 }
 
+// isMovieEntryKey checks if the found "X" string entry is a dict key
+// followed by an opening JSON array.
 func isMovieEntryKey(str string) bool {
 	// Strip the JSON key and trim
 	s := strings.Trim(str[3:], " \n\r\t")
@@ -122,35 +250,8 @@ func isMovieEntryKey(str string) bool {
 	return true
 }
 
-func extractMovieEntries(str string) ([]string, error) {
-	var result []string
-
-	indicies := extractMovieEntryKeyIndices(str)
-	for n := 0; n < len(indicies); n++ {
-		i := indicies[n]
-		j := len(str)
-		if n+1 < len(indicies) {
-			j = indicies[n+1]
-		}
-
-		s := str[i:j]
-		s = stripAndValidatePrefix(s)
-		if s == "" {
-			return nil, fmt.Errorf("Invalid movie list")
-		}
-		s = stripAndValidateSuffix(s)
-		if s == "" {
-			return nil, fmt.Errorf("Invalid movie list")
-		}
-
-		result = append(result, s)
-	}
-
-	return result, nil
-}
-
 // stripAndValidatePrefix checks if the movie entry starts with "X":[
-// and ignores whitespaces. On success it returns the beginning of the
+// and ignores whitespaces. On success it returns the beginning of an
 // JSON array. On error an empty string is returned.
 func stripAndValidatePrefix(str string) string {
 	// Strip the JSON key and trim
@@ -172,6 +273,11 @@ func stripAndValidatePrefix(str string) string {
 	return result
 }
 
+// stripAndValidateSuffix checks if the movie entry ends with a closing squared
+// bracket and ignores whitespaces. Each array is also comma seperated. The
+// comma will be removed. If we reach the end of the import source, the closing
+// curly bracket appears and will be removed, too. On success a proper parsable
+// JSON array (as string) is returned.
 func stripAndValidateSuffix(str string) string {
 	result := strings.Trim(str, " \n\r\t")
 
@@ -190,12 +296,13 @@ func stripAndValidateSuffix(str string) string {
 	return result
 }
 
-func unmarshalMovieEntries(str string) ([]movieEntry, error) {
+// unmarshalMovieImportSource parses the import source for channel, topic and
+// movie entries.
+func unmarshalMovieImportSource(str string) (map[string]int64, map[string]int64, []movieEntry, error) {
 	var result []movieEntry
-
 	entries, err := extractMovieEntries(str)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	for _, e := range entries {
@@ -203,34 +310,73 @@ func unmarshalMovieEntries(str string) ([]movieEntry, error) {
 
 		err := json.Unmarshal([]byte(e), &vals)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 		result = append(result, buildMovieEntry(vals))
 	}
 
-	populateEmptyFields(&result)
+	channels, topics := populateChannelsAndTopics(&result)
 
-	return result, nil
+	return channels, topics, result, nil
 }
 
-func populateEmptyFields(entries *[]movieEntry) {
+// populateChannelsAndTopics iterates over all movie entries and populates empty
+// channel or topic fields with a corresponding entry. The import source sets
+// the channel or topic field only on the first record. The following entries
+// are empty until a new channel or topic starts.
+// Additionally we're creating a channel and topic map which contains a unique
+// ID for each channel and topic. This ID is then applied to the movie entry,
+// too. You can do that all with SQL operations, but applying all IDs in the
+// database tooks more than 60s. This approach consumes only a few seconds.
+func populateChannelsAndTopics(entries *[]movieEntry) (map[string]int64, map[string]int64) {
 	var channel, topic string
+	var channels map[string]int64
+	var topics map[string]int64
+	var channelsLastID, topicsLastID int64
+
+	channels = make(map[string]int64)
+	topics = make(map[string]int64)
+	channelsLastID = 1
+	topicsLastID = 1
 
 	for i := 0; i < len(*entries); i++ {
 		if (*entries)[i].channel == "" {
 			(*entries)[i].channel = channel
 		} else {
 			channel = (*entries)[i].channel
+
+			// Add new channel to map if not exists
+			if _, ok := channels[channel]; !ok {
+				channels[channel] = channelsLastID
+				channelsLastID++
+			}
 		}
 
 		if (*entries)[i].topic == "" {
 			(*entries)[i].topic = topic
 		} else {
 			topic = (*entries)[i].topic
+
+			// Add new topic to map if not exists
+			if _, ok := topics[topic]; !ok {
+				topics[topic] = topicsLastID
+				topicsLastID++
+			}
 		}
+
+		// Update channel and topic ID
+		(*entries)[i].channelID = channels[(*entries)[i].channel]
+		(*entries)[i].topicID = topics[(*entries)[i].topic]
 	}
+
+	return channels, topics
 }
 
+// buildMovieEntry creates a movieEntry from a list of values. The import source
+// contains only JSON arrays for each movie. The order of the array elements
+// matches a specified attribute.
+// TODO: For backward compatibility observe the version in the meta data of the
+// import source.
 func buildMovieEntry(vals []interface{}) movieEntry {
 	var result movieEntry
 	var dt, tm string
@@ -307,6 +453,14 @@ func buildMovieEntry(vals []interface{}) movieEntry {
 	return result
 }
 
+// convertToFullURL builds proper URLs from the given data in the import source.
+// Most URLs in the import source are cutted down to the modified portion
+// compared to the main / base URL, which is a full URL.
+// E.g. the full base URL is "http://.../abc.mp4" and the cutted down HD format
+// URL is "100|def.mp4". That means from position 100 in the base URL replace
+// everything with the string given after the dash.
+// If the non base URLs doesn't contain a dash, than a regular (full) URL is
+// set or none.
 func convertToFullURL(baseURL, url string) string {
 	var result = strings.Trim(url, " ")
 	if result == "" || baseURL == "" {
